@@ -14,6 +14,19 @@ FileSystem::~FileSystem() {
     }
 }
 
+ssize_t FileSystem::allocBlock() {
+    if(!free_blocks_)
+        return -1;
+    // find first free block
+    for(int i = 0; i < meta_data_.blocks; ++i) {
+        if(!free_blocks_[i]) {
+            free_blocks_[i] = true;
+            return (ssize_t)i;
+        }
+    }
+    return -1;
+}
+
 void FileSystem::debug(Disk& disk) {
     Block block;
 
@@ -115,10 +128,10 @@ bool FileSystem::mount(Disk& disk) {
         free_blocks_ = nullptr;
     }
     free_blocks_ = (bool*)calloc(disk.getBlockNum(), sizeof(bool));
-    free_blocks_[0] = 1;
+    free_blocks_[0] = true;
     // inode block used
     for(int i = 0; i < meta_data_.inode_blocks; ++i) {
-        free_blocks_[1 + i] = 1;
+        free_blocks_[1 + i] = true;
     }
 
     return true;
@@ -172,17 +185,298 @@ ssize_t FileSystem::create() {
 }
 
 bool FileSystem::remove(size_t inode_number) {
+    if(!disk_ || !free_blocks_) {
+        return false;
+    }
+    if(inode_number >= meta_data_.inodes) {
+        return false;
+    }
+    size_t blockIdx = 1 + (inode_number / INODES_PER_BLOCK);
+    size_t offset   = inode_number % INODES_PER_BLOCK;
+    Block block = {0};
+    if(disk_->read(blockIdx, block.data) != Disk::BLOCK_SIZE) {
+        return false;
+    }
+    // Check if this inode is free
+    Inode* inode = &block.inodes[offset];
+    if(inode->valid != 1) {
+        return false;
+    }
+    // Release direct blocks
+    for(int i = 0; i < POINTERS_PER_INODE; ++i) {
+        if(inode->direct[i] != 0) {
+            if(inode->direct[i] < disk_->getBlockNum()) {
+                free_blocks_[inode->direct[i]] = 0;
+            }else {
+                printf("Unexpected error in direct block\n");
+            }
+        }
+        inode->direct[i] = 0;
+    }
+    // Release indirect block
+    if(inode->indirect != 0) {
+        Block ind_block = {0};
+        if(disk_->read(inode->indirect, ind_block.data) != Disk::BLOCK_SIZE) {
+            return false;
+        }
+        for(int i = 0; i < POINTERS_PER_BLOCK; ++i) {
+            int blockId = ind_block.pointers[i];
+            if(blockId != 0 && blockId < disk_->getBlockNum()) {
+                // mark block as free in bit map
+                free_blocks_[blockId] = 0;
+            }
+            ind_block.pointers[i] = 0;
+        }
+        if(inode->indirect < disk_->getBlockNum()) {
+            free_blocks_[inode->indirect] = 0;
+        }
+        inode->indirect = 0;
+    }
+    // mark inode as free
+    inode->valid = 0;
+    inode->size  = 0;
+
+    // write the updated block back to disk
+    if(disk_->write(blockIdx, block.data) != Disk::BLOCK_SIZE) {
+        return false;
+    }
+
     return true;
 }
 
 ssize_t FileSystem::stat(size_t inode_number) {
-    return -1;
+    if(!disk_ || !free_blocks_) {
+        return -1;
+    }
+    if(inode_number >= meta_data_.inodes) {
+        return -1;
+    }
+    size_t blockIdx = 1 + (inode_number / INODES_PER_BLOCK);
+    size_t offset   = inode_number % INODES_PER_BLOCK;
+    Block block = {0};
+    if(disk_->read(blockIdx, block.data) != Disk::BLOCK_SIZE) {
+        return -1;
+    }
+    Inode* inode = &block.inodes[offset];
+    if(inode->valid != 1) {
+        return -1;
+    }
+
+    return (ssize_t)inode->size;
 }
 
 ssize_t FileSystem::read(size_t inode_number, char *data, size_t length, size_t offset) {
-    return -1;
+    if(!disk_ || !free_blocks_ || !data) {
+        return -1;
+    }
+    if(inode_number >= meta_data_.inodes) {
+        return -1;
+    }
+    size_t blockIdx = 1 + (inode_number / INODES_PER_BLOCK);
+    size_t offsetInBlock   = inode_number % INODES_PER_BLOCK;
+    Block block = {0};
+    if(disk_->read(blockIdx, block.data) != Disk::BLOCK_SIZE) {
+        return -1;
+    }
+    Inode* inode = &block.inodes[offset];
+    if(inode->valid != 1) {
+        return -1;
+    }
+
+    // Calculate total bytes to read
+    size_t total_bytes = length;
+    if(offset + length > inode->size) {
+        total_bytes = inode->size - offset;
+    }
+    if(total_bytes <= 0) {
+        return 0;
+    }
+
+    size_t bytes_read = 0;
+    // Calculate starting block and offset within blocks of this file
+    size_t current_block_idx = offset / Disk::BLOCK_SIZE;
+    size_t block_offset      = offset % Disk::BLOCK_SIZE;
+
+    Block data_block = {0};
+    while(bytes_read < total_bytes && current_block_idx < POINTERS_PER_INODE) {
+        size_t bIndex = inode->direct[current_block_idx];
+        if(bIndex != 0) {
+            // read the data block
+            if(disk_->read(bIndex, data_block.data) != Disk::BLOCK_SIZE) {
+                return -1;
+            }
+            // Calculate bytes to copy from this block
+            size_t bytes_to_copy = Disk::BLOCK_SIZE - block_offset;
+            if(bytes_to_copy > total_bytes - bytes_read) {
+                bytes_to_copy = total_bytes - bytes_read;
+            }
+            // Copy data to buffer
+            memcpy(data + bytes_read, data_block.data + block_offset, bytes_to_copy);
+            bytes_read += bytes_to_copy;
+        }
+
+        current_block_idx++;
+        block_offset = 0; /*set offset to 0*/
+    }
+    
+    // Read data from indirect block if needed
+    if(bytes_read < total_bytes && inode->indirect != 0) {
+        data_block = {0};
+        Block indirect_block = {0};
+        if(disk_->read(inode->indirect, indirect_block.data) != Disk::BLOCK_SIZE) {
+            return -1;
+        }
+        // NOTE: indirect_idx = 0 here is error
+        size_t indirect_idx = current_block_idx - POINTERS_PER_INODE;
+        while(bytes_read < total_bytes && indirect_idx < POINTERS_PER_BLOCK) {
+            int bIndex = indirect_block.pointers[indirect_idx];
+            if(bIndex != 0) {
+                // Read the data block
+                if(disk_->read(bIndex, data_block.data) != Disk::BLOCK_SIZE) {
+                    return -1;
+                }
+                // Calculate bytes to copy from this block
+                size_t bytes_to_copy = Disk::BLOCK_SIZE - block_offset;
+                if(bytes_to_copy > total_bytes - bytes_read) {
+                    bytes_to_copy = total_bytes - bytes_read;
+                }
+                // Copy data to buffer
+                memcpy(data + bytes_read, data_block.data + block_offset, bytes_to_copy);
+                bytes_read += bytes_to_copy;
+            }
+            indirect_idx++;
+            block_offset = 0;          
+        }
+    }
+    if(bytes_read != total_bytes) {
+        printf("FS read: bytes unmatched!\n");
+    }
+    
+    return (ssize_t)bytes_read;
 }
 
 ssize_t FileSystem::write(size_t inode_number, char *data, size_t length, size_t offset) {
-    return -1;
+    if(!disk_ || !free_blocks_ || !data) {
+        return -1;
+    }
+    if(inode_number >= meta_data_.inodes) {
+        return -1;
+    }
+    size_t blockIdx = 1 + (inode_number / INODES_PER_BLOCK);
+    size_t offsetInBlock   = inode_number % INODES_PER_BLOCK;
+    Block block = {0};
+    if(disk_->read(blockIdx, block.data) != Disk::BLOCK_SIZE) {
+        return -1;
+    }
+    Inode* inode = &block.inodes[offset];
+    if(inode->valid != 1) {
+        return -1;
+    }
+
+    size_t current_block_idx = offset / Disk::BLOCK_SIZE;
+    size_t block_offset      = offset % Disk::BLOCK_SIZE;
+
+    size_t bytes_written = 0;
+    Block data_block = {0};
+    // direct blocks
+    while(bytes_written < length && current_block_idx < POINTERS_PER_INODE) {
+        int bIndex = inode->direct[current_block_idx];
+        if(bIndex == 0) {
+            // alloc new block
+            ssize_t new_block = allocBlock();
+            if(new_block == -1) {
+                return -1;
+            }
+            inode->direct[current_block_idx] = (uint32_t)new_block;
+        }
+        // Read existing data block if we're writing to a non-empty block
+        if(block_offset > 0) {
+            if(disk_->read(inode->direct[current_block_idx], data_block.data) != Disk::BLOCK_SIZE) {
+                return -1;
+            }
+        }
+        // Calculate bytes to copy to this block
+        size_t bytes_to_copy = Disk::BLOCK_SIZE - block_offset;
+        if(bytes_to_copy > length - bytes_written) {
+            bytes_to_copy = length - bytes_written;
+        }
+        // copy data to buffer
+        memcpy(data_block.data + block_offset, data + bytes_written, bytes_to_copy);
+        // Write data block back to disk
+        if(disk_->write(bIndex, data_block.data) != Disk::BLOCK_SIZE) {
+            return -1;
+        }
+        bytes_written += bytes_to_copy;
+        current_block_idx++;
+        block_offset = 0;
+    }
+
+    // Handle indirect blocks if needed
+    data_block = {0};
+    if(bytes_written < length) {
+        Block indirect_block = {0};
+        size_t indirect_idx = current_block_idx - POINTERS_PER_BLOCK;
+        // Allocate indirect block if needed
+        if(inode->indirect == 0) {
+            ssize_t new_block = allocBlock();
+            if(new_block == -1)
+                return -1;
+            inode->indirect = new_block;
+            memset(indirect_block.data, 0, Disk::BLOCK_SIZE);
+            if(disk_->write(inode->indirect, indirect_block.data) != Disk::BLOCK_SIZE) {
+                return -1;
+            }
+        }else {
+            // indirect block exist, read it
+            if(disk_->read(inode->indirect, indirect_block.data) != Disk::BLOCK_SIZE) {
+                return -1;
+            }
+        }
+
+        // Write data to indirect blocks
+        while(bytes_written < length && indirect_idx < POINTERS_PER_BLOCK) {
+            int bIndex = indirect_block.pointers[indirect_idx];
+            if(bIndex == 0) {
+                ssize_t new_block = allocBlock();
+                if(new_block == -1)
+                    return -1;
+                indirect_block.pointers[indirect_idx] = (uint32_t)new_block;
+                // Write updated indirect block
+                if(disk_->write(inode->indirect, indirect_block.data) != Disk::BLOCK_SIZE) {
+                    return -1;
+                }
+            }
+
+            // Read existing data block if we're writing to a non-empty block
+            if(block_offset > 0) {
+                if(disk_->read(indirect_block.pointers[indirect_idx], data_block.data) != Disk::BLOCK_SIZE) {
+                    return -1;
+                }
+            }
+            memset(data_block.data, 0, Disk::BLOCK_SIZE);
+
+            size_t bytes_to_copy = Disk::BLOCK_SIZE - block_offset;
+            if(bytes_to_copy > length - bytes_written) {
+                bytes_to_copy = length - bytes_written;
+            }
+
+            memcpy(data_block.data + block_offset, data + bytes_written, bytes_to_copy);
+
+            // write to disk
+            if(disk_->write(indirect_block.pointers[indirect_idx], data_block.data) != Disk::BLOCK_SIZE) {
+                return -1;
+            }
+            bytes_written += bytes_to_copy;
+            indirect_idx++;
+            block_offset = 0;
+        }
+    }
+    if(offset + length > inode->size) {
+        inode->size = offset + length;
+        if(disk_->write(blockIdx, block.data) != Disk::BLOCK_SIZE) {
+            return -1;
+        }
+    }
+
+    return (ssize_t)bytes_written;
 }

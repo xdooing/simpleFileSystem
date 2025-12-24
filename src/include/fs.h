@@ -16,7 +16,7 @@ public:
     ssize_t stat(size_t inode_number);
     ssize_t read(size_t inode_number, char *data, size_t length, size_t offset);
     ssize_t write(size_t inode_number, char *data, size_t length, size_t offset);
-
+    ssize_t allocBlock();
 
 private:
     const static uint32_t MAGIC_NUMBER       = 0xf0f03410;
