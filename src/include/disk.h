@@ -14,7 +14,7 @@ public:
     ssize_t read(size_t block, char *data);
     ssize_t write(size_t block, char *data);
     void close();
-    void disk_sanity_check(size_t block, const char *data);
+    bool disk_sanity_check(size_t block, const char *data);
     size_t getBlockNum() { return blocks_; }
 
 

@@ -28,6 +28,21 @@ ssize_t FileSystem::allocBlock() {
 }
 
 void FileSystem::debug(Disk& disk) {
+// SuperBlock:
+//     magic number is valid
+//     20 blocks
+//     2 inode blocks
+//     256 inodes
+// Inode 2:
+//     size: 27160 bytes
+//     direct blocks: 4 5 6 7 8
+//     indirect block: 9
+//     indirect data blocks: 13 14
+// Inode 3:
+//     size: 9546 bytes
+//     direct blocks: 10 11 12
+// 4 disk block reads
+// 0 disk block writes
     Block block;
 
     /* Read SuperBlock */
@@ -39,6 +54,39 @@ void FileSystem::debug(Disk& disk) {
     printf("    %u inodes\n"         , block.super.inodes);
 
     /* Read Inodes */
+    size_t inodeBlocksNum = block.super.inode_blocks;
+    Block data_block = {0};
+    for(int blockIdx = 1; blockIdx <= inodeBlocksNum; ++blockIdx) {
+        if(disk.read(blockIdx, data_block.data) != Disk::BLOCK_SIZE) {
+            printf("Failed to read block.\n");
+            return;
+        }
+        for(int inodeIdx = 0; inodeIdx < INODES_PER_BLOCK; ++inodeIdx) {
+            Inode* inode = &data_block.inodes[inodeIdx];
+            size_t total_inode_num = (blockIdx - 1) * INODES_PER_BLOCK + inodeIdx;
+            if(total_inode_num >= block.super.inodes)
+                break;
+            
+            if(inode->valid == 1) {
+                
+            } 
+
+
+
+
+        }
+
+
+
+
+
+    }
+
+
+
+
+
+
 }
 
 /**
@@ -60,7 +108,7 @@ bool FileSystem::format(Disk& disk) {
     free_blocks_ = (bool*)calloc(numBlocks, sizeof(bool));
 
     size_t numInodes   = numBlocks / 10; /*use 10% of total Blocks*/
-    if(numInodes < 100) numInodes = 100;
+    if(numInodes < INODES_PER_BLOCK) numInodes = INODES_PER_BLOCK;
     uint32_t numInodeBlocks = (numInodes + INODES_PER_BLOCK - 1) / INODES_PER_BLOCK;
     
     meta_data_.magic_number = MAGIC_NUMBER;

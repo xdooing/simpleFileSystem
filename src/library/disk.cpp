@@ -16,8 +16,23 @@ Disk::~Disk() {
     close();
 }
 
+bool Disk::disk_sanity_check(size_t block, const char *data) {
+    if(block < 0 || block >= blocks_) {
+        printf("Invalid block num %ld\n", block);
+        return false;
+    }
+    if(data == nullptr) {
+        printf("null data pointer\n");
+        return false;
+    }
+    return true;
+}
+
 bool Disk::open(const char *path, size_t blocks) {
-    file_descriptor_ = ::open(path, O_RDWR|O_CREAT, 0600);
+    if(!path || blocks == 0)
+        return false;
+    
+    file_descriptor_ = ::open(path, O_RDWR|O_CREAT, 0644);
     if(file_descriptor_ < 0) {
         printf("Failed to open %s - %s\n", path, strerror(errno));
         return false;
@@ -29,7 +44,7 @@ bool Disk::open(const char *path, size_t blocks) {
         return false;
     }
 
-    blocks  = blocks;
+    blocks_ = blocks;
     reads_  = 0;
     writes_ = 0;
 
@@ -46,13 +61,43 @@ void Disk::close() {
 }
 
 ssize_t Disk::read(size_t block, char *data) {
-    return 0;
+    if(not disk_sanity_check(block, data)) {
+        return false;
+    }
+
+    // Calculate the byte offset for the specified block
+    off_t offset = block * BLOCK_SIZE;
+    if(lseek(file_descriptor_, offset, SEEK_SET) < 0) {
+        printf("Error in lseek - %s\n", strerror(errno));
+        return -1;
+    }
+
+    // Reading from block to data buffer (must be BLOCK_SIZE)
+    ssize_t bytes = ::read(file_descriptor_, data, BLOCK_SIZE);
+    if(bytes != BLOCK_SIZE) {
+        printf("Error in read - %s\n", strerror(errno));
+        return -1;
+    }
+    reads_++;
+    return bytes;
 }
 
 ssize_t Disk::write(size_t block, char *data) {
-    return 0;
-}
+    if(not disk_sanity_check(block, data)) {
+        return false;
+    }
 
-void Disk::disk_sanity_check(size_t block, const char *data) {
-    
+    off_t offset = block * BLOCK_SIZE;
+    if(lseek(file_descriptor_, offset, SEEK_SET) < 0) {
+        printf("Error in lseek - %s\n", strerror(errno));
+        return -1;
+    }
+
+    ssize_t bytes = ::write(file_descriptor_, data, BLOCK_SIZE);
+    if(bytes != BLOCK_SIZE) {
+        printf("Error in write - %s\n", strerror(errno));
+        return -1;
+    }
+    writes_++;
+    return bytes;
 }
