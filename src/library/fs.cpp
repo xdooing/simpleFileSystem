@@ -28,27 +28,17 @@ ssize_t FileSystem::allocBlock() {
 }
 
 void FileSystem::debug(Disk& disk) {
-// SuperBlock:
-//     magic number is valid
-//     20 blocks
-//     2 inode blocks
-//     256 inodes
-// Inode 2:
-//     size: 27160 bytes
-//     direct blocks: 4 5 6 7 8
-//     indirect block: 9
-//     indirect data blocks: 13 14
-// Inode 3:
-//     size: 9546 bytes
-//     direct blocks: 10 11 12
-// 4 disk block reads
-// 0 disk block writes
     Block block;
 
     /* Read SuperBlock */
     disk.read(0, block.data);
 
     printf("SuperBlock:\n");
+    if(block.super.magic_number == MAGIC_NUMBER) {
+        printf("    magic number is valid\n");
+    }else {
+        printf("    magic number is invalid\n");
+    }
     printf("    %u blocks\n"         , block.super.blocks);
     printf("    %u inode blocks\n"   , block.super.inode_blocks);
     printf("    %u inodes\n"         , block.super.inodes);
@@ -68,25 +58,45 @@ void FileSystem::debug(Disk& disk) {
                 break;
             
             if(inode->valid == 1) {
-                
+                // Inode 2:
+                //     size: 27160 bytes
+                //     direct blocks: 4 5 6 7 8
+                //     indirect block: 9
+                //     indirect data blocks: 13 14
+                printf("Inode %d:\n", inodeIdx);
+                printf("    size: %u bytes\n", inode->size);
+                int direct_num = 0;
+                for(int i = 0; i < POINTERS_PER_INODE; ++i) {
+                    if(inode->direct[i] != 0)
+                        direct_num++;
+                }
+                if(direct_num > 0) {
+                    printf("    direct blocks:");
+                    for(int i = 0; i < direct_num; ++i) {
+                        printf(" %u", inode->direct[i]);
+                    }
+                    printf("\n");
+                }
+                // indirect block
+                if(inode->indirect != 0) {
+                    printf("    indirect block: %d\n", inode->indirect);
+                    Block indirect_block = {0};
+                    if(disk.read(inode->indirect, indirect_block.data) != Disk::BLOCK_SIZE) {
+                        printf("Failed to read block.\n");
+                        return;
+                    }
+                    printf("    indirect data blocks:");
+                    for(int i = 0; i < POINTERS_PER_BLOCK; ++i) {
+                        if(indirect_block.pointers[i] == 0) {
+                            printf("\n");
+                            break;
+                        }
+                        printf(" %u", indirect_block.pointers[i]);
+                    }
+                }
             } 
-
-
-
-
         }
-
-
-
-
-
     }
-
-
-
-
-
-
 }
 
 /**
@@ -451,7 +461,7 @@ ssize_t FileSystem::write(size_t inode_number, char *data, size_t length, size_t
         // copy data to buffer
         memcpy(data_block.data + block_offset, data + bytes_written, bytes_to_copy);
         // Write data block back to disk
-        if(disk_->write(bIndex, data_block.data) != Disk::BLOCK_SIZE) {
+        if(disk_->write(inode->direct[current_block_idx], data_block.data) != Disk::BLOCK_SIZE) {
             return -1;
         }
         bytes_written += bytes_to_copy;
