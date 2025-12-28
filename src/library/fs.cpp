@@ -336,7 +336,7 @@ ssize_t FileSystem::read(size_t inode_number, char *data, size_t length, size_t 
     if(disk_->read(blockIdx, block.data) != Disk::BLOCK_SIZE) {
         return -1;
     }
-    Inode* inode = &block.inodes[offset];
+    Inode* inode = &block.inodes[inode_number];
     if(inode->valid != 1) {
         return -1;
     }
@@ -426,7 +426,7 @@ ssize_t FileSystem::write(size_t inode_number, char *data, size_t length, size_t
     if(disk_->read(blockIdx, block.data) != Disk::BLOCK_SIZE) {
         return -1;
     }
-    Inode* inode = &block.inodes[offset];
+    Inode* inode = &block.inodes[inode_number];
     if(inode->valid != 1) {
         return -1;
     }
